@@ -16,15 +16,15 @@ import Data.List                 ( foldr )
 import Data.Ord                  ( Ord, min, max )
 import Prelude                   ( Enum, Bounded, minBound, maxBound
                                  , Num, (+), Integral
-                                 , fromEnum, fromInteger, fromIntegral
-                                 , divMod
+                                 , fromEnum, fromIntegral
+                                 , divMod, (<=), (&&), (/=), (.)
                                  )
 
 -- base-unicode-symbols
-import Data.Bool.Unicode         ( (∧) )
-import Data.Eq.Unicode           ( (≢) )
-import Data.Ord.Unicode          ( (≤) )
-import Data.Function.Unicode     ( (∘) )
+-- import Data.Bool.Unicode         ( (∧) )
+-- import Data.Eq.Unicode           ( (≢) )
+-- import Data.Ord.Unicode          ( (<=) )
+-- import Data.Function.Unicode     ( (∘) )
 
 
 -------------------------------------------------------------------------------
@@ -32,16 +32,16 @@ import Data.Function.Unicode     ( (∘) )
 -------------------------------------------------------------------------------
 
 genFromEnum ∷ (Enum e, Num n) ⇒ e → n
-genFromEnum = fromIntegral ∘ fromEnum
+genFromEnum = fromIntegral . fromEnum
 
-orBits ∷ Bits α ⇒ [α] → α
+orBits ∷ (Num α, Bits α) ⇒ [α] → α
 orBits = foldr (.|.) 0
 
-andBits ∷ Bits α ⇒ [α] → α
+andBits ∷ (Num α, Bits α) ⇒ [α] → α
 andBits = foldr (.&.) $ complement 0
 
 clamp ∷ (Bounded α, Ord α) ⇒ α → α
-clamp = atLeast minBound ∘ atMost maxBound
+clamp = atLeast minBound . atMost maxBound
 
 atLeast ∷ Ord α ⇒ α → α → α
 atLeast = max
@@ -51,7 +51,7 @@ atMost = min
 
 divRndUp ∷ Integral α ⇒ α → α → α
 divRndUp x y = let (d, m) = x `divMod` y
-               in d + if m ≢ 0 then 1 else 0
+               in d + if m /= 0 then 1 else 0
 
 between ∷ Ord α ⇒ α → α → α → Bool
-between lo hi x = lo ≤ x ∧ x ≤ hi
+between lo hi x = lo <= x && x <= hi
