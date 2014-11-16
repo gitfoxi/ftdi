@@ -113,6 +113,70 @@ reqReadEEPROM      ∷ RequestCode
 reqWriteEEPROM     ∷ RequestCode
 reqEraseEEPROM     ∷ RequestCode
 
+
+
+setDivisor, mpsseWriteNeg, mpsseBitmode, mpsseReadNeg, mpsseLsb, mpsseDoWrite, mpsseDoRead, mpsseWriteTms,  sendImmediate, waitOnHigh, waitOnLow, mpsseGetLowByte, mpsseGetHighByte, mpsseLoopBackStart, mpsseLoopBackEnd, disableDiv5, enableDiv5, enable3Phase, disable3Phase, clockBits, clockBytes, clockWaitHIgh, clockWaitLow, enableAdaptiveClock, disableAdaptiveClock, clockBytesOrHigh, clockBytesOrLow, driveOpenCollector, readShort, readExtended, writeShort, writeExtended, mpsseSetLowByte, mpsseSetHighByte :: RequestCode
+
+-- See libftdi1-1.1/src/ftdi.h for even more commands
+
+-- TODO: MPSEE commands need their own type and should be limited to executing
+-- in MPSEE mode. Otherwise you get a PipeException
+--
+-- /* Shifting commands IN MPSSE Mode*/
+-- Or these together to create a command
+mpsseWriteNeg  = 0x01    -- Write TDI/DO on negative TCK/SK edge*/
+mpsseBitmode    = 0x02    -- Write bits, not bytes */
+mpsseReadNeg   = 0x04    -- Sample TDO/DI on negative TCK/SK edge */
+mpsseLsb        = 0x08    -- LSB first */
+mpsseDoWrite   = 0x10    -- Write TDI/DO */
+mpsseDoRead    = 0x20    -- Read TDO/DI */
+mpsseWriteTms  = 0x40    -- Write TMS/CS */
+
+-- FTDI MPSSE commands
+-- drive parallel data
+mpsseSetLowByte  = 0x80
+-- output enable; 1 usually means enable
+-- But, to assert the flyswatter srst is something confusing
+mpsseSetHighByte = 0x82
+mpsseGetLowByte  = 0x81
+mpsseGetHighByte = 0x83
+mpsseLoopBackStart = 0x84
+mpsseLoopBackEnd   = 0x85
+-- 2232H speecific commands
+-- H Type specific commands */
+setDivisor   = 0x86
+disableDiv5 =     0x8a
+enableDiv5 =      0x8b
+enable3Phase =    0x8c
+disable3Phase =   0x8d
+clockBits =       0x8e
+clockBytes =      0x8f
+clockWaitHIgh =   0x94
+clockWaitLow =    0x95
+enableAdaptiveClock = 0x96
+disableAdaptiveClock =    0x97
+clockBytesOrHigh = 0x9c
+clockBytesOrLow =  0x0d
+--FT232H specific commands */
+driveOpenCollector = 0x9e
+-- Commands in Host Emulation Mode */
+readShort =     0x90
+-- Address_Low */
+readExtended =  0x91
+-- Address High */
+-- Address Low  */
+writeShort =    0x92
+-- Address_Low */
+writeExtended = 0x93
+-- Address High */
+-- Address Low  */
+
+-- Commands in MPSSE and Host Emulation Mode */
+sendImmediate = 0x87
+waitOnHigh =   0x88
+waitOnLow =    0x89
+
+---------------------------
 reqReset           = 0x00
 reqSetModemCtrl    = 0x01
 reqSetFlowCtrl     = 0x02

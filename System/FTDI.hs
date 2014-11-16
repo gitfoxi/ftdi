@@ -55,6 +55,11 @@ module System.FTDI
     , BitMode(..)
     , setBitMode
 
+    -- *Low-level control
+    , control
+    , readControl
+    , writeControl
+
       -- **Line properties
     , Parity(..)
     , BitDataFormat(..)
