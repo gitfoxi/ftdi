@@ -12,7 +12,7 @@ import Debug.Trace
 
 import Control.Concurrent (threadDelay)
 import Control.Monad (void, replicateM, when)
-import Control.Exception
+import Control.Exception hiding (handle)
 import           Data.Bits ( (.&.), (.|.), shiftR, shiftL )
 import qualified Data.ByteString as B
 import           Data.Typeable
@@ -91,9 +91,9 @@ expect iface expected = do
 
 data ExpectationError =
     ExpectationError
-      { expected :: [Word8]
-      , got      :: [Word8]
-      , stat     :: USB.Status
+      { iexpected :: [Word8]
+      , igot      :: [Word8]
+      , istat     :: USB.Status
       }
     deriving Typeable
 
@@ -101,9 +101,9 @@ instance Exception ExpectationError
 
 instance Show ExpectationError where
   show (ExpectationError expected got stat) =
-      "Error: Expecting " ++ showHexList expected
-        ++ " Got: " ++ showHexList got
-        ++ " Status: " ++ show stat
+      "Error: Expecting: " ++ showHexList expected
+   ++ "       Got: "       ++ showHexList got
+   ++ "       Status: "    ++ show stat
 
 -- | Intialize an interface to MPSEE mode ready to send JTAG streams
 initForJtag ::
@@ -164,7 +164,8 @@ initForJtag iface = do
     -- Disable 3-phase clocking 0x8D
     , disable3Phase
     -- Set data and direction of lower byte 0x80 0x3B 0x3B -- all outputs high
-    , mpsseSetLowByte, outputMask, outputMask
+    -- writeList iface [ 0x80, 0x18, 0x7b, sendImmediate ]
+    , mpsseSetLowByte, 0x18, outputMask -- only TMS, nTRST high. All others low.
     -- Set data and direction of upper byte 0x82 0x00 0x02 -- red LED on
     , mpsseSetHighByte, red, led
     -- Disable loopback 0x85
@@ -224,13 +225,14 @@ withFlySwatter2 freqKhz job = do
 
 
 -- low byte
-tck, tdi, tdo, tms, trst, srst, led, red, yellow :: Word8
+notSure, tck, tdi, tdo, tms, trst, srst, led, red, yellow :: Word8
 tck  = 0x01
 tdi  = 0x02
 tdo  = 0x04
 tms  = 0x08
 trst = 0x10
 srst = 0x20
+notSure = 0x40 -- Whatever this is, it needs it's output enabled
 
 -- high byte
 led = 0x40
@@ -241,7 +243,7 @@ red    = 0x04
 
 -- | output mask for FT2232h's low byte so outputs are enabled
 outputMask :: Word8
-outputMask = tck .|. tdi .|. tms .|. trst .|. srst
+outputMask = tck .|. tdi .|. tms .|. trst .|. srst .|. notSure
 
 shiftTck ::
   FTDI.InterfaceHandle
@@ -327,8 +329,10 @@ testBlink n iface =
       writeList iface [0x82, 0, 0]
       threadDelay 30000
 
+clockTDIbytes, clockTMSbits, clockTDIbits, clockTDObytes, clockTDIObytes :: RequestCode
 clockTMSbits = mpsseWriteNeg .|. mpsseBitmode .|. mpsseLsb .|. mpsseWriteTms
 clockTDIbits = mpsseWriteNeg .|. mpsseBitmode .|. mpsseLsb .|. mpsseDoWrite
+clockTDIbytes = mpsseWriteNeg .|. mpsseLsb .|. mpsseDoWrite
 clockTDObytes = mpsseDoRead .|. mpsseLsb
 clockTDIObytes = mpsseDoRead .|. mpsseLsb .|. mpsseDoWrite .|. mpsseWriteNeg
 
@@ -341,23 +345,11 @@ testIdcode iface =
       -- LED on while reading
       writeList iface [0x82, led, red]
 
-      -- Maybe it helps to set the pins stable again
-      writeList iface [ 0x82, 0x00, 0x01 ]
-
-      -- reset
-      writeList iface [ 0x80, 0x08, 0x7b, 0x87 ]
-      shiftTck iface 1000 -- TODO: or is it this one?
-      writeList iface [ 0x80, 0x18, 0x7b, 0x87 ]
-      shiftTck iface 1000 -- TODO: or is it this one?
-
-      writeList iface [ clockTMSbits, 0, 1 ]
-      shiftTck iface 2000 -- TODO: maybe work around for sleepy jtag port
-      
-      -- reset
-      shiftTck iface 1000 -- TODO: or is it this one?
-      writeList iface [ 0x80, 0x08, 0x7b, 0x87 ]
-      shiftTck iface 1000 -- TODO: or is it this one?
-      writeList iface [ 0x80, 0x18, 0x7b, 0x87 ]
+      -- TestLogicReset
+      writeList iface
+        [
+          clockTMSbits, 0, 1 -- 1 1 bit on tms
+        ]
 
       -- TMS to RTI
       writeList iface
@@ -365,23 +357,29 @@ testIdcode iface =
           clockTMSbits, 0, 0 -- 1 0 bit on tms
         ]
 
-      shiftTck iface 1000 -- TODO: or is it this one?
+      shiftTck iface 1000 -- This one wakes the sleepy JTAG
 
-      -- -- Try setting IR = 2
+      -- Try setting IR = 010101010102, 45 bits
+      -- For IPJTAG -- can't make it work
       -- writeList iface $
       --   [
       --     clockTMSbits
       --   , 3 -- 4 bits
       --   , 0x2 -- 1 1 0 0
+      --   , clockTDIbytes
+      --   , 4 -- 5 bytes
+      --   , 0
+      --   , 1,1,1,1,1 -- 5 bytes of 1
       --   , clockTDIbits
-      --   , 3 -- low 4 of 5-bit register; luckily the high bit is also 0
+      --   , 4 -- 5-bit register; luckily the high bit is also 0
       --   , 2
       --   , clockTMSbits
-      --   , 7
-      --   , 0x2 -- back to RTI
+      --   , 7 -- 8 bits 
+      --   , 0x3 -- back to RTI 1 1 0 ...
+      --   , sendImmediate
       --   ]
 
-      -- TMS to shiftDR
+      -- RTI to shiftDR
       writeList iface $
         [
           clockTMSbits
@@ -390,18 +388,24 @@ testIdcode iface =
         , clockTDIObytes 
         , 99 -- 100 bytes
         , 0 -- up to 65536
-        -- 20 0 bytes
         ] ++ replicate 100 0x5A ++
         [
-          sendImmediate -- send immediate
+          clockTMSbits
+        , 7
+        , 0xF  -- back to TestLogicReset
+        , sendImmediate -- send immediate
         ]
 
       -- After this really long pause we do get 8 bytes
       -- unfortunately they are 0xFFFFFFFF
-      threadDelay 2000000 -- 100 ms Doesn't help
+      -- threadDelay 2000000 -- 100 ms Doesn't help
 
-      (idcode, _) <- FTDI.readBulk iface 102 -- TODO: better solution for drop 2
-      let nidcode = foldr (\x acc -> (fromIntegral x) .|. (acc `shiftL` 8)) (0 :: Integer) . drop 2 . B.unpack $ idcode
+      -- (idcode, _) <- FTDI.readBulk iface 102 -- TODO: better solution for drop 2
+      -- let nidcode = foldr (\x acc -> fromIntegral x .|. (acc `shiftL` 8)) (0 :: Integer) . drop 2 . B.unpack $ idcode
+
+      (packets, _) <- runChunkedReaderT (readData iface (return False) 100) B.empty
+      let idcode = B.concat packets
+      let nidcode = foldr (\x acc -> fromIntegral x .|. (acc `shiftL` 8)) (0 :: Integer) . B.unpack $ idcode
 
       printf "0x%08x\n" nidcode
 
