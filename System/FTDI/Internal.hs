@@ -8,11 +8,17 @@
            , UnicodeSyntax
   #-}
 
+-- Multi-Protocol Synchronous Serial Engine (MPSSE) is documented here:
+--
+--  http://www.ftdichip.com/Support/Documents/AppNotes/AN_108_Command_Processor_for_MPSSE_and_MCU_Host_Bus_Emulation_Modes.pdf
+
 module System.FTDI.Internal where
 
 -------------------------------------------------------------------------------
 -- Imports
 -------------------------------------------------------------------------------
+
+import Debug.Trace
 
 -- from base:
 import Control.Applicative       ( Applicative, (<$>), Alternative )
@@ -49,7 +55,7 @@ import Prelude                   ( Enum, succ
                                  , Double, Integer
                                  , fromEnum, fromIntegral
                                  , realToFrac, floor, ceiling
-                                 , div, error, (.), (*), (/)
+                                 , div, error, (.), (*), (/), (++), show
                                  )
 import System.IO                 ( IO )
 import Text.Read                 ( Read )
@@ -575,16 +581,19 @@ readData ifHnd checkStop numBytes = ChunkedReaderT $
 
 -- |Perform a bulk read.
 --
--- Returns the bytes that where read (in the form of a 'ByteString') and a flag
+-- Returns the bytes that were read (in the form of a 'ByteString') and a flag
 -- which indicates whether a timeout occured during the request.
 readBulk ∷ InterfaceHandle
          → Int -- ^Number of bytes to read
          → IO (ByteString, USB.Status)
-readBulk ifHnd numBytes =
-    USB.readBulk (devHndUSB $ ifHndDevHnd ifHnd)
+readBulk ifHnd numBytes = do
+    (bs, stat) <-
+      USB.readBulk (devHndUSB $ ifHndDevHnd ifHnd)
                  (interfaceEndPointIn $ ifHndInterface ifHnd)
-                 (devHndTimeout $ ifHndDevHnd ifHnd)
                  numBytes
+                 (devHndTimeout $ ifHndDevHnd ifHnd)
+    traceShowM ("read", stat, bs)
+    return (bs, stat)
 
 -- |Perform a bulk write.
 --
@@ -593,11 +602,14 @@ readBulk ifHnd numBytes =
 writeBulk ∷ InterfaceHandle
           → ByteString -- ^Data to be written
           → IO (USB.Size, USB.Status)
-writeBulk ifHnd bs =
-    USB.writeBulk (devHndUSB $ ifHndDevHnd ifHnd)
+writeBulk ifHnd bs = do
+    (siz, stat) <-
+      USB.writeBulk (devHndUSB $ ifHndDevHnd ifHnd)
                   (interfaceEndPointOut $ ifHndInterface ifHnd)
                   bs
                   (devHndTimeout $ ifHndDevHnd ifHnd)
+    traceShowM ("write", siz, stat, bs)
+    return (siz, stat)
 
 -------------------------------------------------------------------------------
 -- Control Requests
@@ -624,7 +636,7 @@ genControl usbCtrl index ifHnd request value =
     usbCtrl usbHnd
             USB.Vendor
             USB.ToDevice
-            request
+            (trace ("Control request:" ++ show request) request)
             value
             (index .|. (interfaceIndex $ ifHndInterface ifHnd))
             (devHndTimeout devHnd)
@@ -642,7 +654,7 @@ writeControl ifHnd request value bytestring = USB.writeControl
             usbHnd
             USB.Vendor
             USB.ToDevice
-            request
+            (trace ("Control request:" ++ show request) request)
             value
             (index .|. (interfaceIndex $ ifHndInterface ifHnd))
             bytestring

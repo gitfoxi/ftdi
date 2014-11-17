@@ -1,17 +1,22 @@
 
+-- | Following the example at:
+--
+--  http://www.ftdichip.com/Support/Documents/AppNotes/AN_129_FTDI_Hi_Speed_USB_To_JTAG_Example.pdf
+
 {-# LANGUAGE OverloadedLists #-}
 
 module FlySwatter2 where
 
-import Control.Applicative
 import Control.Concurrent (threadDelay)
-import Control.Exception
-import Control.Monad
+import Control.Monad (void, replicateM, when)
+import Control.Monad.Error (catchError)
 import           Data.Word
-import           Data.Bits ( (.&.), (.|.), complement, shiftR )
+import           Data.Bits ( (.&.), (.|.), shiftR )
 import qualified Data.ByteString as B
 import qualified Data.Vector as V
-import           Data.Vector ( (!), findIndex )
+import           Data.Vector ( (!) )
+import           Numeric (showHex)
+import           System.IO (hPutStrLn, stderr)
 
 import System.FTDI.Internal as FTDI
 import System.USB  as USB
@@ -24,8 +29,8 @@ isFlySwatter2 ::
   USB.DeviceDesc
   -> Bool
 isFlySwatter2 desc =
-    (deviceVendorId desc) == vid &&
-    (deviceProductId desc) == pid
+    deviceVendorId desc == vid &&
+    deviceProductId desc == pid
   where
     vid = 0x0403 -- Tin Can Tools
     pid = 0x6010 -- Flyswatter 2
@@ -60,38 +65,45 @@ writeList iface bs=
   void $
     FTDI.writeBulk iface (B.pack bs)
 
+showHexList ::
+  (Integral a, Show a) =>
+  [a]
+  -> String
+showHexList = unwords . map (`showHex` "")
+
 -- | expect throws an exception if it can't read the expected data
 expect ::
   FTDI.InterfaceHandle
   -> [Word8]
   -> IO ()
 expect iface expected = do
-  (dat, stat) <- FTDI.readBulk iface (length expected)
-  if dat /= (B.pack expected)
-    -- TODO: show Hex
-    then error $ "Error: Expecting " ++ show expected
-                    ++ " Got: " ++ show dat
+  -- TODO: Better solution for dropping first 2 bytes of each "packet"
+  -- which are apparently modem status bytes
+  (dat0, stat) <- FTDI.readBulk iface (2 + length expected)
+  let dat = B.drop 2 dat0
+  when (dat /= B.pack expected) $
+      error    $ "Error: Expecting " ++ showHexList expected
+                    ++ " Got: " ++ showHexList (B.unpack dat)
                     ++ " Status: " ++ show stat
-    else return ()
 
 -- | Intialize an interface to MPSEE mode ready to send JTAG streams
 initForJtag ::
-  USB.Device
-  -> FTDI.InterfaceHandle
-  -> FTDI.DeviceHandle
+  FTDI.InterfaceHandle
   -> IO ()
-initForJtag usbdev iface handle0 = do
+initForJtag iface = do
   -- Empty the buffers
-  FTDI.purgeWriteBuffer iface
+  -- FTDI.purgeWriteBuffer iface
+  -- FTDI.purgeReadBuffer  iface
+  -- FTDI.purgeWriteBuffer iface
   FTDI.purgeReadBuffer  iface
   -- USB request transfer sizes to 64k
   -- (Seems libusb doesn't support this concept)
 
+  -- Try resetting may help
+  -- NOPE: reset iface
+
   -- Disable event and error characters
   FTDI.setEventCharacter iface Nothing
-
-  -- Set read and write timeouts
-  let handle = FTDI.setTimeout handle0 5000
 
   -- Set latency timer
   FTDI.setLatencyTimer iface 16
@@ -102,13 +114,27 @@ initForJtag usbdev iface handle0 = do
   -- set bitmode to MPSSE
   setBitMode iface 0x0 BitMode_MPSSE
 
+  -- Wait for USB as if it wasn't already slow enough (50ms)
+  threadDelay 50000
+
+  -- Bogus command echo only seems to fail sometimes the first time
+  -- so I do it twice until I understand the issue better.
+
   -- Send bogus command 0xAA
 
   writeList iface [0xAA]
+  catchError 
+    (expect iface [0xFA, 0xAA])
+    (\err ->
+      hPutStrLn stderr $
+        "Sometimes FTDI doesn't respond to the first command so this error is just\
+        \informational: \n" ++ show err)
 
-  -- Expect 0xFA 0xAA
-
+  writeList iface [0xAA]
   expect iface [0xFA, 0xAA]
+
+  -- Expect 0xFA 0xAA. BadCommand echo.
+
 
   writeList iface
     [ 
@@ -143,7 +169,7 @@ setTckKhz iface freqKhz =
 divisor ::
   KHz
   -> Int
-divisor (KHz freqKhz) = fromIntegral $ floor $ 30000.0 / freqKhz - 1
+divisor (KHz freqKhz) = floor $ 30000.0 / freqKhz - 1
 
 -- TODO: Check
 -- * divisor 6000 = 0x0000
@@ -162,9 +188,13 @@ withFlySwatter2 ::
 withFlySwatter2 freqKhz job = do
   usbdev <- flyDev
   ftdidev <- fromUSBDevice usbdev ChipType_2232H
-  FTDI.withDeviceHandle ftdidev $ \handle ->
+  FTDI.withDeviceHandle ftdidev $ \handle0 -> do
+    -- Set read and write timeouts
+    -- TODO: want timeout to be 5000 but there's a bug where any control transfer
+    -- waits for a timeout to complete
+    let handle = FTDI.setTimeout handle0 50
     FTDI.withInterfaceHandle handle Interface_A $ \iface -> do
-      initForJtag usbdev iface handle
+      initForJtag iface
       -- Set clock divisor 0x86 valueL valueH -- aim for 1 MHz
       setTckKhz iface freqKhz
       job iface
@@ -204,7 +234,7 @@ shiftMoreBytes ::
   Int ->
   [Word8]
 shiftMoreBytes bs
-    | bs > maxBytes = splitClockBytes 0xFFFF ++ shiftMoreBytes (bs - maxBytes)
+    | bs > maxBytes = splitClockBytes (0xFFFF :: Int) ++ shiftMoreBytes (bs - maxBytes)
     | bs >= 8 = splitClockBytes (bs - bytes - 1) ++ shiftBits bits
     | bs > 0 = shiftBits bs
     | otherwise = error "Can't shift negative bytes"
@@ -218,7 +248,7 @@ shiftBits ::
   -> [Word8] -- TODO: [Command] instead of [Word8] for more type-check
 shiftBits bs
   | bs == 0 = []
-  | bs <= 8 = [clockBits, (fromIntegral $ bs - 1)]
+  | bs <= 8 = [clockBits, fromIntegral $ bs - 1]
   | otherwise = error "Clock bits can only clock 8 or fewer bits"
 
 splitClockBytes ::
@@ -227,7 +257,7 @@ splitClockBytes ::
   -> [Word8]
 splitClockBytes bs
   | bs == 0 = []
-  | bs <= 0xFFFF = [clockBytes, (lowByte bs), (highByte bs)]
+  | bs <= 0xFFFF = [clockBytes, lowByte bs, highByte bs]
   | otherwise = error "splitClockBytes can only clock 0xFFFF or fewer bytes"
 
 -- TODO: tests
@@ -248,34 +278,37 @@ highByte ::
   Integral n =>
   n
   -> Word8
-highByte n = 0xff .&. ((fromIntegral n) `shiftR` 8)
+highByte n = 0xff .&. (fromIntegral n `shiftR` 8)
 
 lowByte ::
   Integral n =>
   n
   -> Word8
-lowByte n = 0xff .&. (fromIntegral n)
+lowByte n = 0xff .&. fromIntegral n
 
 -- TODO: remove junk
 
+-- | Blink the LEDs on the FlySwatter2
 testBlink ::
   Int  -- ^ number of times to toggle
   -> FTDI.InterfaceHandle
   -> IO ()
 testBlink n iface =
-  void $ do
-    -- FTDI.control iface mpsseSetLowByte  0x0
-    -- FTDI.control iface mpsseSetHighByte (fromIntegral outputMask)
-    replicateM 10 $ do
+  void $
+    replicateM n $ do
       writeList iface [0x82, led, red .|. yellow]
-      threadDelay 500000
+      threadDelay 50000
+      writeList iface [0x82, led, red]
+      threadDelay 50000
+      writeList iface [0x82, led, yellow]
+      threadDelay 50000
       writeList iface [0x82, 0, 0]
-      threadDelay 500000
 
 
 -- | Remind you that TCK frequencies are in KHz
 newtype KHz = KHz Double
 
+doTest :: IO ()
 doTest = do
   -- TODO: (Somewhere else) -- shift 500 TCK to wakeup Jtag
   withFlySwatter2 (KHz 1000) (testBlink 5)
