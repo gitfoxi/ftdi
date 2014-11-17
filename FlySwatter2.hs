@@ -4,19 +4,24 @@
 --  http://www.ftdichip.com/Support/Documents/AppNotes/AN_129_FTDI_Hi_Speed_USB_To_JTAG_Example.pdf
 
 {-# LANGUAGE OverloadedLists #-}
+{-# LANGUAGE DeriveDataTypeable #-}
 
 module FlySwatter2 where
 
+import Debug.Trace
+
 import Control.Concurrent (threadDelay)
 import Control.Monad (void, replicateM, when)
-import Control.Monad.Error (catchError)
-import           Data.Word
-import           Data.Bits ( (.&.), (.|.), shiftR )
+import Control.Exception
+import           Data.Bits ( (.&.), (.|.), shiftR, shiftL )
 import qualified Data.ByteString as B
+import           Data.Typeable
 import qualified Data.Vector as V
 import           Data.Vector ( (!) )
+import           Data.Word
 import           Numeric (showHex)
 import           System.IO (hPutStrLn, stderr)
+import           Text.Printf (printf)
 
 import System.FTDI.Internal as FTDI
 import System.USB  as USB
@@ -82,9 +87,23 @@ expect iface expected = do
   (dat0, stat) <- FTDI.readBulk iface (2 + length expected)
   let dat = B.drop 2 dat0
   when (dat /= B.pack expected) $
-      error    $ "Error: Expecting " ++ showHexList expected
-                    ++ " Got: " ++ showHexList (B.unpack dat)
-                    ++ " Status: " ++ show stat
+      throwIO (ExpectationError expected (B.unpack dat) stat)
+
+data ExpectationError =
+    ExpectationError
+      { expected :: [Word8]
+      , got      :: [Word8]
+      , stat     :: USB.Status
+      }
+    deriving Typeable
+
+instance Exception ExpectationError
+
+instance Show ExpectationError where
+  show (ExpectationError expected got stat) =
+      "Error: Expecting " ++ showHexList expected
+        ++ " Got: " ++ showHexList got
+        ++ " Status: " ++ show stat
 
 -- | Intialize an interface to MPSEE mode ready to send JTAG streams
 initForJtag ::
@@ -123,12 +142,12 @@ initForJtag iface = do
   -- Send bogus command 0xAA
 
   writeList iface [0xAA]
-  catchError 
+  catch
     (expect iface [0xFA, 0xAA])
     (\err ->
       hPutStrLn stderr $
-        "Sometimes FTDI doesn't respond to the first command so this error is just\
-        \informational: \n" ++ show err)
+        "Sometimes FTDI doesn't respond to the first command so this error is just \
+        \informational: \n" ++ show (err :: ExpectationError))
 
   writeList iface [0xAA]
   expect iface [0xFA, 0xAA]
@@ -150,6 +169,8 @@ initForJtag iface = do
     , mpsseSetHighByte, red, led
     -- Disable loopback 0x85
     , mpsseLoopBackEnd
+--    for fun, this works to show that it can be done in loopback
+--    , mpsseLoopBackStart
     ]
 
 -- | setTckKhz sets the clock divider so TCK is close to the desired rate in KHz
@@ -157,7 +178,8 @@ setTckKhz ::
   FTDI.InterfaceHandle
   -> KHz
   -> IO ()
-setTckKhz iface freqKhz =
+setTckKhz iface freqKhz = do
+    traceM ("divH: " ++ show divH ++ "  divL: " ++ show divL)
     writeList iface [ setDivisor, divH, divL ]
   where
     -- TCK period = 60,000 KHz / ((1 + (divH << 8) | divL) * 2)
@@ -214,8 +236,8 @@ srst = 0x20
 led = 0x40
 
 -- high-byte OE for leds
-red    = 0x02
-yellow = 0x04
+yellow = 0x02
+red    = 0x04
 
 -- | output mask for FT2232h's low byte so outputs are enabled
 outputMask :: Word8
@@ -297,19 +319,106 @@ testBlink n iface =
   void $
     replicateM n $ do
       writeList iface [0x82, led, red .|. yellow]
-      threadDelay 50000
+      threadDelay 30000
       writeList iface [0x82, led, red]
-      threadDelay 50000
+      threadDelay 30000
       writeList iface [0x82, led, yellow]
-      threadDelay 50000
+      threadDelay 30000
       writeList iface [0x82, 0, 0]
+      threadDelay 30000
 
+clockTMSbits = mpsseWriteNeg .|. mpsseBitmode .|. mpsseLsb .|. mpsseWriteTms
+clockTDIbits = mpsseWriteNeg .|. mpsseBitmode .|. mpsseLsb .|. mpsseDoWrite
+clockTDObytes = mpsseDoRead .|. mpsseLsb
+clockTDIObytes = mpsseDoRead .|. mpsseLsb .|. mpsseDoWrite .|. mpsseWriteNeg
+
+-- | Read and print a 32-bit IdCode off JTAG
+testIdcode ::
+  FTDI.InterfaceHandle
+  -> IO ()
+testIdcode iface =
+  void $ do
+      -- LED on while reading
+      writeList iface [0x82, led, red]
+
+      -- Maybe it helps to set the pins stable again
+      writeList iface [ 0x82, 0x00, 0x01 ]
+
+      -- reset
+      writeList iface [ 0x80, 0x08, 0x7b, 0x87 ]
+      shiftTck iface 1000 -- TODO: or is it this one?
+      writeList iface [ 0x80, 0x18, 0x7b, 0x87 ]
+      shiftTck iface 1000 -- TODO: or is it this one?
+
+      writeList iface [ clockTMSbits, 0, 1 ]
+      shiftTck iface 2000 -- TODO: maybe work around for sleepy jtag port
+      
+      -- reset
+      shiftTck iface 1000 -- TODO: or is it this one?
+      writeList iface [ 0x80, 0x08, 0x7b, 0x87 ]
+      shiftTck iface 1000 -- TODO: or is it this one?
+      writeList iface [ 0x80, 0x18, 0x7b, 0x87 ]
+
+      -- TMS to RTI
+      writeList iface
+        [
+          clockTMSbits, 0, 0 -- 1 0 bit on tms
+        ]
+
+      shiftTck iface 1000 -- TODO: or is it this one?
+
+      -- -- Try setting IR = 2
+      -- writeList iface $
+      --   [
+      --     clockTMSbits
+      --   , 3 -- 4 bits
+      --   , 0x2 -- 1 1 0 0
+      --   , clockTDIbits
+      --   , 3 -- low 4 of 5-bit register; luckily the high bit is also 0
+      --   , 2
+      --   , clockTMSbits
+      --   , 7
+      --   , 0x2 -- back to RTI
+      --   ]
+
+      -- TMS to shiftDR
+      writeList iface $
+        [
+          clockTMSbits
+        , 2 -- 3 bits LSB first
+        , 0x1 -- 1 0 0
+        , clockTDIObytes 
+        , 99 -- 100 bytes
+        , 0 -- up to 65536
+        -- 20 0 bytes
+        ] ++ replicate 100 0x5A ++
+        [
+          sendImmediate -- send immediate
+        ]
+
+      -- After this really long pause we do get 8 bytes
+      -- unfortunately they are 0xFFFFFFFF
+      threadDelay 2000000 -- 100 ms Doesn't help
+
+      (idcode, _) <- FTDI.readBulk iface 102 -- TODO: better solution for drop 2
+      let nidcode = foldr (\x acc -> (fromIntegral x) .|. (acc `shiftL` 8)) (0 :: Integer) . drop 2 . B.unpack $ idcode
+
+      printf "0x%08x\n" nidcode
+
+      -- Back to TestLogicReset
+      writeList iface [ clockTMSbits, 7, 0xF ]
+
+      -- LED off when done
+      writeList iface [0x82, 0, 0, sendImmediate] -- send immediate
 
 -- | Remind you that TCK frequencies are in KHz
 newtype KHz = KHz Double
 
 doTest :: IO ()
 doTest = do
-  -- TODO: (Somewhere else) -- shift 500 TCK to wakeup Jtag
-  withFlySwatter2 (KHz 1000) (testBlink 5)
+  withFlySwatter2 (KHz 2000) $ do
+  -- TODO: Bug where it only actually does the last of these 3 things
+    -- testBlink 5
+    -- (\iface -> shiftTck iface 2000) -- work around for sleepy jtag port
+    testIdcode
   return ()
